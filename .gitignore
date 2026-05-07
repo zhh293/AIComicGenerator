@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment & Secrets
+config/api_keys.env
+.env
+*.env
+!*.env.example
+
+# Output & Temp
+output/*
+!output/.gitkeep
+temp/*
+!temp/.gitkeep
+
+# LUT files (large binary)
+luts/*.cube
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
