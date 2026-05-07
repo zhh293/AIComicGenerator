@@ -26,6 +26,7 @@ from src.config import settings
 from src.crews.asset_generation_crew import AssetGenerationCrew
 from src.crews.screenplay_crew import ScreenplayCrew
 from src.crews.video_composition_crew import VideoCompositionCrew
+from src.emotion.curve import EmotionQuantizer
 from src.flow.state import (
     FilmProjectState,
     SceneAssetBundle,
@@ -119,6 +120,37 @@ class FilmProductionFlow(Flow[FilmProjectState]):
             f"{state.screenplay.title if state.screenplay else 'FAILED'}"
         )
 
+        # 剧本生成后立即构建情绪曲线
+        if state.screenplay:
+            self._build_emotion_curve()
+
+    def _build_emotion_curve(self) -> None:
+        """根据剧本场景的 mood 字段自动构建量化情绪曲线"""
+        state = self.state
+        if not state.screenplay or not state.screenplay.scenes:
+            return
+
+        quantizer = EmotionQuantizer()
+        curve = quantizer.build_curve_from_scenes(state.screenplay.scenes)
+
+        # 序列化存入 state（Pydantic BaseModel 兼容的 dict 列表）
+        state.emotion_curve_data = [
+            {
+                "scene_id": p.scene_id,
+                "tension": p.tension,
+                "valence": p.valence,
+                "energy": p.energy,
+                "mood_label": p.mood_label,
+            }
+            for p in curve.points
+        ]
+
+        logger.info(
+            f"Emotion curve built: {len(curve.points)} points, "
+            f"climax at scene {curve.climax_scene_id}, "
+            f"emotional range: {curve.emotional_range:.2f}"
+        )
+
     # ================================================================
     # Stage 3: 剧本质量检查
     # ================================================================
@@ -159,6 +191,9 @@ class FilmProductionFlow(Flow[FilmProjectState]):
         report = state.quality_reports.get("screenplay")
 
         if report and report.passed:
+            # 质量通过后，判断是否需要人工确认
+            if not state.auto_approve:
+                return "await_approval"
             return "generate_assets"
 
         # 检查重试次数
@@ -169,11 +204,36 @@ class FilmProductionFlow(Flow[FilmProjectState]):
             logger.warning(
                 f"Screenplay retry limit reached ({retry_count}), proceeding anyway"
             )
+            if not state.auto_approve:
+                return "await_approval"
             return "generate_assets"
 
         state.increment_retry("screenplay")
         logger.info(f"Retrying screenplay (attempt {retry_count + 1})")
         return "retry_screenplay"
+
+    @listen("await_approval")
+    def await_approval(self) -> None:
+        """暂停流水线，等待用户确认剧本"""
+        logger.info("=== 流水线暂停：等待用户确认剧本 ===")
+
+        state = self.state
+        state.current_stage = "awaiting_approval"
+        state.awaiting_approval = True
+
+        # 阻塞等待外部信号解除
+        # TaskManager 会通过设置 awaiting_approval = False 来放行
+        import time
+        while state.awaiting_approval:
+            time.sleep(1)
+
+        logger.info("=== 用户已确认剧本，继续执行 ===")
+        state.current_stage = "asset_generation"
+
+    @listen(await_approval)
+    def proceed_after_approval(self) -> None:
+        """确认后继续素材生成"""
+        self.generate_assets()
 
     @listen("retry_screenplay")
     def retry_screenplay_creation(self) -> None:
@@ -233,8 +293,56 @@ class FilmProductionFlow(Flow[FilmProjectState]):
 
         result = crew.crew().kickoff()
 
+        # 从 crew 结果中提取锁定的角色参考图并写入 state
+        self._extract_locked_references(result)
+
         state.progress_percent = 60.0
         logger.info("Asset generation complete")
+
+    def _extract_locked_references(self, crew_result) -> None:
+        """从 crew 结果中解析锁定的参考图路径并写入 state"""
+        import json
+
+        state = self.state
+
+        # 尝试从 task outputs 中找到 lock_reference_images_task 的输出
+        try:
+            if hasattr(crew_result, "tasks_output") and crew_result.tasks_output:
+                # 锁定任务是第二个任务（index=1）
+                lock_task_output = crew_result.tasks_output[1]
+                raw_output = (
+                    lock_task_output.raw
+                    if hasattr(lock_task_output, "raw")
+                    else str(lock_task_output)
+                )
+
+                # 尝试从输出中提取 JSON
+                # 匹配 {"locked_references": {...}} 结构
+                import re
+                json_match = re.search(r'\{[^{}]*"locked_references"\s*:\s*\{[^}]*\}[^}]*\}', raw_output)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    locked_refs = parsed.get("locked_references", {})
+                    if locked_refs:
+                        state.character_reference_images.update(locked_refs)
+                        logger.info(
+                            f"Locked {len(locked_refs)} character reference images: "
+                            f"{list(locked_refs.keys())}"
+                        )
+                        return
+
+            # 备选：如果 character_manager 已有注册信息，从中提取
+            if hasattr(self, "_asset_crew") and self._asset_crew:
+                mgr = self._asset_crew.character_manager
+                if hasattr(mgr, "_reference_images") and mgr._reference_images:
+                    state.character_reference_images.update(mgr._reference_images)
+                    logger.info("Extracted references from CharacterConsistencyManager")
+                    return
+
+            logger.warning("Could not extract locked reference images from crew output")
+
+        except (json.JSONDecodeError, IndexError, AttributeError) as e:
+            logger.warning(f"Failed to parse locked references: {e}")
 
     # ================================================================
     # Stage 5: 素材质量检查（简化版）

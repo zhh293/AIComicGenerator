@@ -83,6 +83,7 @@ async def create_project(
         duration=request.duration,
         title=request.title,
         language=request.language,
+        auto_approve=request.auto_approve,
     )
 
     # 后台启动 Flow
@@ -145,6 +146,27 @@ async def cancel_project(project_id: str) -> dict[str, str]:
 # ================================================================
 # 项目操作
 # ================================================================
+
+
+@router.post("/projects/{project_id}/approve", tags=["projects"])
+async def approve_project(project_id: str) -> dict[str, str]:
+    """
+    确认剧本，放行流水线继续执行
+
+    当项目状态为 awaiting_approval 时调用此接口，
+    系统将继续执行素材生成和视频合成流程。
+    """
+    mgr = get_task_manager()
+    success = mgr.approve_project(project_id)
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Project {project_id} cannot be approved. "
+                "It must be in 'awaiting_approval' status."
+            ),
+        )
+    return {"message": f"Project {project_id} approved, resuming production."}
 
 
 @router.post("/projects/{project_id}/retry", tags=["projects"])

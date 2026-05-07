@@ -5,6 +5,8 @@ from __future__ import annotations
 from crewai import Agent, Crew, Process, Task
 
 from src.config import settings
+from src.emotion.curve import EmotionCurve, EmotionPoint, EmotionQuantizer
+from src.emotion.mapper import EmotionToParamsMapper
 from src.flow.state import FilmProjectState, SceneAssetBundle
 from src.llm import get_llm
 from src.style.presets import StylePresetConfig
@@ -264,25 +266,65 @@ class VideoCompositionCrew:
         )
 
     def _color_grading_task(self) -> Task:
-        """全片调色"""
+        """全片调色 — 结合风格基底 + 情绪曲线逐场景微调"""
         color_params = self.style_config.color_grading_params
+
+        # 构建情绪曲线的逐场景调色参数
+        emotion_color_note = ""
+        curve_data = self.project_state.emotion_curve_data
+        if curve_data:
+            curve = EmotionCurve()
+            for d in curve_data:
+                curve.add_point(EmotionPoint(
+                    scene_id=d["scene_id"],
+                    tension=d["tension"],
+                    valence=d["valence"],
+                    energy=d["energy"],
+                    mood_label=d.get("mood_label", ""),
+                ))
+            mapper = EmotionToParamsMapper()
+            color_lines = []
+            for point in curve.points:
+                params = mapper.map_scene(point)
+                cg = params.color_grading
+                color_lines.append(
+                    f"  Scene {point.scene_id} ({point.mood_label or 'N/A'}): "
+                    f"sat={cg.saturation_offset:+.3f}, "
+                    f"contrast={cg.contrast_offset:+.3f}, "
+                    f"temp={cg.temperature_offset:+.3f}, "
+                    f"brightness={cg.brightness_offset:+.3f}, "
+                    f"vignette={cg.vignette_strength:.2f}"
+                )
+            emotion_color_note = (
+                "\n[Emotion Curve → Per-Scene Color Grading Offsets]\n"
+                "These offsets should be APPLIED ON TOP of the global style "
+                "color grading below. They create emotional variation while "
+                "maintaining overall style unity:\n"
+                + "\n".join(color_lines)
+                + "\n\n"
+                "Implementation: Apply global style LUT first, then per-scene "
+                "adjustments using FFmpeg eq/colorbalance filters with "
+                "time-segmented filter graphs.\n\n"
+            )
 
         return Task(
             description=(
                 f"对全片进行 {self.style_config.display_name} 风格的调色：\n\n"
-                f"【调色参数】\n"
+                f"【全局风格调色参数 (Base)】\n"
                 f"- 对比度: {color_params.get('contrast', 1.0)}\n"
                 f"- 饱和度: {color_params.get('saturation', 1.0)}\n"
                 f"- 色温偏移: {color_params.get('temperature', 'neutral')}\n"
                 f"- 暗部色调: {color_params.get('shadows_tint', 'neutral')}\n"
                 f"- 高光色调: {color_params.get('highlights_tint', 'neutral')}\n"
                 f"- 暗角强度: {color_params.get('vignette', 0)}\n\n"
+                f"{emotion_color_note}"
                 "调色原则：\n"
                 "1. 确保全片色调统一（不同场景由于 AI 生成可能有色差）\n"
                 "2. 先做全局校正（白平衡、曝光），再做风格化\n"
-                "3. 不要过度调色以至于画面失真\n"
+                "3. 在风格基底上叠加情绪曲线的逐场景微调\n"
                 "4. 保持肤色自然（如有人物的话）\n"
-                "5. 暗部不能死黑，高光不能过曝\n\n"
+                "5. 暗部不能死黑，高光不能过曝\n"
+                "6. 情绪变化过渡要平滑，不要在场景边界突变\n\n"
                 "使用 FFmpeg colorbalance/curves/eq 滤镜组合完成。\n"
                 "输出路径: {output_dir}/temp/color_graded.mp4"
             ),

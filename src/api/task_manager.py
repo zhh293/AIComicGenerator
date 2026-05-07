@@ -32,6 +32,7 @@ class ProjectRecord:
         duration: float,
         title: str | None = None,
         language: str = "zh",
+        auto_approve: bool = True,
     ):
         self.project_id = project_id
         self.prompt = prompt
@@ -39,6 +40,7 @@ class ProjectRecord:
         self.duration = duration
         self.title = title
         self.language = language
+        self.auto_approve = auto_approve
         self.status = ProjectStatus.QUEUED
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.current_stage: str | None = None
@@ -96,6 +98,7 @@ class TaskManager:
         duration: float,
         title: str | None = None,
         language: str = "zh",
+        auto_approve: bool = True,
     ) -> None:
         """注册新项目"""
         record = ProjectRecord(
@@ -105,6 +108,7 @@ class TaskManager:
             duration=duration,
             title=title,
             language=language,
+            auto_approve=auto_approve,
         )
         # 初始化阶段列表
         record.stages = [
@@ -135,16 +139,29 @@ class TaskManager:
                 # 构建 Flow 初始状态
                 initial_state = FilmProjectState(
                     user_prompt=record.prompt,
-                    style_type=StyleType(record.style),
-                    target_duration=record.duration,
+                    style=StyleType(record.style),
+                    target_duration_seconds=record.duration,
+                    auto_approve=record.auto_approve,
                 )
 
                 flow = FilmProductionFlow(state=initial_state)
                 record.flow_state = initial_state
 
+                # 启动状态同步（检测暂停状态）
+                async def _sync_status():
+                    while record.status == ProjectStatus.RUNNING:
+                        await asyncio.sleep(1)
+                        if initial_state.awaiting_approval:
+                            record.status = ProjectStatus.AWAITING_APPROVAL
+                            record.current_stage = "awaiting_approval"
+
+                sync_task = asyncio.create_task(_sync_status())
+
                 # 运行 Flow（同步操作，放在线程池中）
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(None, flow.kickoff)
+
+                sync_task.cancel()
 
                 # 更新完成状态
                 if record.cancelled:
@@ -205,6 +222,22 @@ class TaskManager:
         except Exception as e:
             record.status = ProjectStatus.FAILED
             record.error = str(e)
+
+    def approve_project(self, project_id: str) -> bool:
+        """确认剧本，放行流水线继续执行"""
+        record = self._projects.get(project_id)
+        if not record:
+            return False
+        if record.status != ProjectStatus.AWAITING_APPROVAL:
+            return False
+
+        # 解除 Flow 的阻塞等待
+        if record.flow_state:
+            record.flow_state.awaiting_approval = False
+
+        record.status = ProjectStatus.RUNNING
+        logger.info(f"Project {project_id} approved, resuming flow")
+        return True
 
     def cancel_project(self, project_id: str) -> bool:
         """取消项目"""

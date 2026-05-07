@@ -296,6 +296,10 @@ class FilmProjectState(BaseModel):
     user_prompt: str = Field(default="", description="用户原始描述")
     style: StyleType = Field(default=StyleType.CINEMATIC, description="风格选择")
     target_duration_seconds: float = Field(default=60.0, description="目标时长（秒）")
+    auto_approve: bool = Field(default=True, description="是否自动通过剧本审核")
+
+    # === 流程控制 ===
+    awaiting_approval: bool = Field(default=False, description="是否正在等待人工确认")
 
     # === 各阶段产出 ===
     screenplay: Optional[Screenplay] = Field(default=None, description="完整剧本")
@@ -304,6 +308,12 @@ class FilmProjectState(BaseModel):
     )
     music: Optional[GeneratedMusicAsset] = Field(default=None, description="背景音乐")
     final_video_path: Optional[str] = Field(default=None, description="最终视频路径")
+
+    # === 情绪曲线 ===
+    emotion_curve_data: List[dict] = Field(
+        default_factory=list,
+        description="量化情绪曲线 [{scene_id, tension, valence, energy, mood_label}]",
+    )
 
     # === 一致性管理 ===
     character_registry: List[Character] = Field(

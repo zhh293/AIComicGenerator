@@ -13,6 +13,7 @@ class ProjectStatus(str, Enum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"  # 剧本待确认
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -61,6 +62,10 @@ class CreateProjectRequest(BaseModel):
     language: str = Field(
         default="zh",
         description="语言代码（zh/en/ja 等）",
+    )
+    auto_approve: bool = Field(
+        default=True,
+        description="是否自动通过剧本审核。设为 false 则剧本生成后暂停等待人工确认",
     )
 
 
